@@ -1,10 +1,10 @@
-# Ws-RPC
+# WS-RPC
 
 Protocol Buffer Plugin for WebSocket based RPC generated code.
 
-Similar to gRPC, WsRPC will generate server and client code for your RPC routes.
+Similar to gRPC, WsRPC will generate server and client code for your protobuf defined RPC.
 
-Based on templates, you can change everything depending on your needs.
+Based on templates, you can change the output depending on your needs.
 
 Default supported templates:
 
