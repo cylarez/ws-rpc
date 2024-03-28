@@ -1,0 +1,122 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
+using RobotSquid.Core;
+using {{.CsharpProtoNamespace}};
+using RobotSquid.Network.Proxy;
+using RobotSquid.Proxy.Proto;
+using Empty = Google.Protobuf.WellKnownTypes.Empty;
+
+namespace Proxy.{{.CsharpServiceName}}
+{
+	public class {{.Name}} : IServiceController, IEventDispatcher
+	{
+		private static {{.Name}} ms_instance;
+		public static {{.Name}} instance => ms_instance ?? (ms_instance = new {{.Name}}());
+		
+		private static string SERVICE_NAME = "{{.ProtoName}}";
+		private static Dictionary<String, Action<IMessage>> ms_routes;
+
+		{{range $val := .Methods}}public delegate void On{{$val.Name}}Delegate({{$val.Response}} response, ErrorPayload error);
+		{{end}}
+		private readonly ConcurrentDictionary<int, CallbackInfo> m_callbacks = new ConcurrentDictionary<int, CallbackInfo>();
+		private readonly ConcurrentDictionary<int, IMessage> m_yieldableResponses = new ConcurrentDictionary<int, IMessage>();
+
+		public void OnReceive(Response message, ErrorPayload error)
+		{
+			if(!message.Service.Equals(SERVICE_NAME)) return;
+
+			switch(message.Route)
+			{
+				{{range $val := .Methods}}
+				case "{{$val.Name}}":
+				{
+					var unpackedResponse = error == null ? message.Payload.Unpack<{{$val.Response}}>() : null;
+					m_events.DispatchEvent<On{{$val.Name}}Delegate>(unpackedResponse, error);
+					if(m_callbacks.TryGetValue(message.Index, out var callbackInfo))
+					{
+						m_callbacks.TryRemove(message.Index, out _);
+						if(callbackInfo.callback is Action<{{$val.Response}}, ErrorPayload> concreteCallback)
+						{
+							var currentLoop = Core.instance.GetCurrentEventLoop();
+							if(callbackInfo.loop == null || callbackInfo.loop == currentLoop)
+							{
+								// On the same loop, call directly
+								concreteCallback.Invoke(unpackedResponse, error);
+							}
+							else
+							{
+								// Different loop so post it
+								callbackInfo.loop.Post(() => {concreteCallback.Invoke(unpackedResponse, error); });
+							}
+						}
+						if(callbackInfo.yieldable)
+						{
+							m_yieldableResponses[message.Index] = error != null ? error : unpackedResponse;
+						}
+					}
+					break;
+				}
+				{{end}}
+			}
+		}
+
+		{{range $val := .Methods}}
+		public void {{$val.Name}}({{$val.Request}} request, Action<{{$val.Response}}, ErrorPayload> callback = null)
+		{
+			var index = ServiceRouter.instance.Send(request, SERVICE_NAME, "{{$val.Name}}", this);
+			if(callback != null)
+			{
+				m_callbacks[index] = new CallbackInfo(callback, Core.instance.GetCurrentEventLoop());
+			}
+		}
+
+		public RequestYieldInstruction<{{$val.Response}}> {{$val.Name}}Yield({{$val.Request}} request)
+		{
+			var index = ServiceRouter.instance.Send(request, SERVICE_NAME, "{{$val.Name}}", this);
+			var yieldable = new RequestYieldInstruction<{{$val.Response}}>(index, TryConsumeResponse);
+			m_callbacks[index] = new CallbackInfo(null, Core.instance.GetCurrentEventLoop(), true);
+
+			return yieldable;
+		}
+		{{end}}
+		
+		private IMessage TryConsumeResponse(int index)
+		{
+			if(m_yieldableResponses.TryGetValue(index, out var response))
+			{
+				m_yieldableResponses.TryRemove(index, out _);
+			}
+			return response;
+		}
+
+		//--------------------------------------------------------------------------
+		// IEventDispatcher interface
+		private EventDispatcher m_events = new EventDispatcher();
+		public void AddEventListener<TEventID>(TEventID listener) where TEventID : Delegate
+        {
+            ServiceRouter.instance.Register(SERVICE_NAME, this);
+            m_events.AddEventListener(listener);
+        }
+		public void RemoveEventListener<TEventID>(TEventID listener) where TEventID : Delegate => m_events.RemoveEventListener(listener);
+		public bool HasEvent<TEventID>() where TEventID : Delegate => m_events.HasEvent<TEventID>();
+		// End of IEventDispatcher interface
+		//--------------------------------------------------------------------------
+		
+		private readonly struct CallbackInfo
+		{
+			public object callback { get; }
+			public EventLoop loop { get; }
+			public bool yieldable { get; }
+
+			public CallbackInfo(object callback, EventLoop loop, bool yieldable = false)
+			{
+				this.callback = callback;
+				this.loop = loop;
+				this.yieldable = yieldable;
+			}
+		}
+	}
+}

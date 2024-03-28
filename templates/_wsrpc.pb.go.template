@@ -1,0 +1,132 @@
+package {{$.ProtoName | ToLower }}
+
+import (
+    "context"
+    "google.golang.org/protobuf/proto"
+    {{if .UseEmpty}}"google.golang.org/protobuf/types/known/emptypb"{{end}}
+    "net/http"
+    "{{$.GoPackage}}/core"
+    "time"
+)
+
+const ServiceName = "{{$.ProtoName}}"
+
+var (
+{{- range $val := .Methods}}
+    {{$val.Name}} = core.WsRpcRoute{Service:"{{$.ProtoName}}", Name: "{{$val.Name}}"}
+{{- end}}
+)
+
+type {{.ProtoName}}RPC interface {
+    {{- range $val := .Methods}}
+    {{$val.Name}}(ctx context.Context, req *{{if ne $val.Request "Empty"}}{{$val.Request}}{{else}}emptypb.Empty{{end}}) (resp *{{if ne $val.Response "Empty"}}{{$val.Response}}{{else}}emptypb.Empty{{end}}, err error)
+    {{- end}}
+}
+
+type WsProxy{{.Name}} struct {
+    client  {{.Name}}Client
+    controller {{.ProtoName}}RPC
+}
+
+type HttpProxy{{.Name}} struct {
+    router core.HttpRouter
+    client  {{.Name}}Client
+    controller {{.ProtoName}}RPC
+}
+
+func WsService(ws core.Router, controller {{.ProtoName}}RPC) {
+    var c = WsProxy{{.Name}}{controller: controller}
+    ws.AddOptions(GetRouteOptions())
+    {{- range $val := .Methods}}
+    ws.AddRoute({{$val.Name}}, c.{{$val.Name}})
+    {{- end}}
+}
+
+func HttpService(r core.HttpRouter, controller {{.ProtoName}}RPC) {
+    s := HttpProxy{{.Name}}{router: r, controller: controller}
+    {{- range $val := .Methods}}
+    r.AddRoute({{$val.Name}}, "/{{$.ProtoName | ToLower}}/{{$val.Name | ToKebabCase}}", s.{{$val.Name}})
+    {{- end}}
+}
+
+func NewClient(address string, optTimeouts ...map[core.WsRpcRoute]time.Duration) {{.Name}}Client {
+    return New{{.Name }}Client(grpc.CustomDial("{{$.ProtoName}}", "{{.Name }}", address, optTimeouts...))
+}
+
+func ProxyGrpcService(wsRouter core.Router, httpRouter core.HttpRouter, address string, optTimeouts ...map[core.WsRpcRoute]time.Duration) {{.Name}}Client  {
+    client := NewClient(address, optTimeouts...)
+    wsRouter.AddOptions(GetRouteOptions())
+    s1 := WsProxy{{.Name }}{client: client}
+
+    {{- range $val := .Methods}}
+    wsRouter.AddRoute({{$val.Name}}, s1.{{$val.Name}})
+    {{- end}}
+
+    httpRouter.AddOptions(GetRouteOptions())
+    s2 := HttpProxy{{.Name}}{router: httpRouter, client: client}
+    {{- range $val := .Methods}}
+    httpRouter.AddRoute({{$val.Name}}, "/{{$.ProtoName | ToLower}}/{{$val.Name | ToKebabCase}}", s2.{{$val.Name}})
+    {{- end}}
+
+    return client
+}
+
+// WebSocket Requests
+{{range $val := .Methods}}
+func (s WsProxy{{$.Name}}) {{$val.Name}}(ctx context.Context, request *proxy.Request) (resp proto.Message, err error) {
+    {{- if eq $val.Request "Empty"}}
+    r := new(emptypb.Empty)
+    {{- else}}
+    r := new({{$val.Request}})
+    if err = request.Payload.UnmarshalTo(r); err != nil {
+        return
+    }
+    {{- end}}
+    if s.client != nil {
+        return s.client.{{$val.Name}}(ctx, r)
+    }
+    return s.controller.{{$val.Name}}(ctx, r)
+}
+{{end}}
+
+// HTTP Requests
+{{range $val := .Methods}}
+func (s HttpProxy{{$.Name}}) {{$val.Name}}(w http.ResponseWriter, r *http.Request) {
+    {{- if eq $val.Request "Empty"}}
+    msg := new(emptypb.Empty)
+    {{- else}}
+    msg := new({{$val.Request}})
+    {{- end}}
+    {{- if eq $val.Response "Empty"}}
+    resp := new(emptypb.Empty)
+    {{- else}}
+    resp := new({{$val.Response}})
+    {{- end}}
+    req, err := s.router.InitHttpRequest(w, r, {{$val.Name}}, msg)
+    if err != nil {
+        s.router.SendResponse(req, resp, err)
+        return
+    }
+    if req == nil {
+        return
+    }
+    if s.client != nil {
+        resp, err = s.client.{{$val.Name}}(req.Ctx, msg)
+    } else {
+        err = s.router.CheckAuth(req.Client, {{$val.Name}})
+        if err == nil {
+            resp, err = s.controller.{{$val.Name}}(req.Ctx, msg)
+        }
+    }
+    s.router.SendResponse(req, resp, err)
+}
+{{end}}
+
+// Route Options (code generated scopes)
+func GetRouteOptions() (options map[string]*proxy.RouteOptions) {
+    options = map[string]*proxy.RouteOptions{}
+    {{- range $val := .Methods}}
+    options[{{$val.Name}}.GetId()] = core.GetRpcScope("{{$.ProtoName}}.{{$.Name}}.{{$val.Name}}", E_Options)
+    {{- end}}
+    return
+}
